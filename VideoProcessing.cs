@@ -10,6 +10,7 @@ using NAudio.Wave;
 using NAudio.WaveFormRenderer;
 using WMPLib;
 using System.Linq;
+using System.Diagnostics;
 
 namespace VideoEditor
 {
@@ -18,7 +19,7 @@ namespace VideoEditor
 
         public static string FileNameWithoutExtension(string fileName)
         {
-            return fileName.Split('.')[0];
+            return Path.GetFileNameWithoutExtension(fileName);
         }
 
         public static void ConvertMp4ToMp3(string inputFile, string outputFile)
@@ -69,8 +70,15 @@ namespace VideoEditor
             }
             if (!File.Exists(outputFile))
             {
-                var ConvertVideo = new FFMpegConverter();
-                ConvertVideo.ConvertMedia(inputFile, outputFile, "wav");
+                try
+                {
+                    var ConvertVideo = new FFMpegConverter();
+                    ConvertVideo.ConvertMedia(inputFile, outputFile, "wav");
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine("Audio extraction failed: " + ex.Message);
+                }
             }
         }
         public static Image GetVideoTumbnail(string inputFile, float frame, string outputPath)
@@ -79,23 +87,31 @@ namespace VideoEditor
             {
                 return null;
             }
-            var spittedFiles = inputFile.Split('.');
-            string outputFile = "";
-            if (spittedFiles.Length == 2)
+            try
             {
-                outputFile = outputPath + spittedFiles[0].Split('\\').Last() + "_" + frame + ".jpeg";
+                string fileNameNoExt = Path.GetFileNameWithoutExtension(inputFile);
+                // Sanitize the filename for use in output path (remove special chars)
+                string safeFileName = string.Join("_", fileNameNoExt.Split(Path.GetInvalidFileNameChars()));
+                string outputFile = Path.Combine(outputPath, safeFileName + "_" + frame + ".jpeg");
+                
+                if (File.Exists(outputFile))
+                {
+                    return Image.FromFile(outputFile);
+                }
+                
+                var ConvertVideo = new FFMpegConverter();
+                ConvertVideo.GetVideoThumbnail(inputFile, outputFile, frame);
+                
                 if (File.Exists(outputFile))
                 {
                     return Image.FromFile(outputFile);
                 }
             }
-            else
+            catch (Exception ex)
             {
-                return null;
+                Debug.WriteLine("Thumbnail generation failed at frame " + frame + ": " + ex.Message);
             }
-            var ConvertVideo = new FFMpegConverter();
-            ConvertVideo.GetVideoThumbnail(inputFile, outputFile, frame);
-            return Image.FromFile(outputFile);
+            return null;
         }
         public static void ConcatVideo(string[] inputFile, string outputFile)
         {
@@ -124,17 +140,43 @@ namespace VideoEditor
 
         public static Image CreateWaveImage(string path, int duration)
         {
+            // Scale waveform width with duration for better resolution
+            int waveWidth = Math.Max(640, duration * 10); // ~10 pixels per second
+            if (waveWidth > 8000) waveWidth = 8000; // Cap to avoid memory issues
+            int waveHeight = 70; // Fill most of the track height (80px)
 
-            var myRendererSettings = new StandardWaveFormRendererSettings();
-            myRendererSettings.Width = 640;
-            myRendererSettings.TopHeight = 40;
-            myRendererSettings.BottomHeight = 0;
+            if (string.IsNullOrEmpty(path) || !File.Exists(path))
+            {
+                return new Bitmap(waveWidth, waveHeight);
+            }
 
-            var renderer = new WaveFormRenderer();
-            var image = renderer.Render(new WaveFileReader(path), myRendererSettings);
+            try
+            {
+                var myRendererSettings = new StandardWaveFormRendererSettings();
+                myRendererSettings.Width = waveWidth;
+                myRendererSettings.TopHeight = waveHeight / 2;
+                myRendererSettings.BottomHeight = waveHeight / 2;
+                myRendererSettings.BackgroundColor = Color.Transparent;
 
-            return image;
-
+                var renderer = new WaveFormRenderer();
+                using (var reader = new AudioFileReader(path))
+                {
+                    var image = renderer.Render(reader, myRendererSettings);
+                    return image;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("Waveform rendering failed: " + ex.Message);
+                
+                Bitmap bmp = new Bitmap(waveWidth, waveHeight);
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    g.Clear(Color.FromArgb(50, Color.Gray));
+                    g.DrawString("Audio Waveform unavailable", SystemFonts.DefaultFont, Brushes.White, 10, 10);
+                }
+                return bmp;
+            }
         }
     }
 }

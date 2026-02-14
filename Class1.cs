@@ -10,6 +10,7 @@ namespace VideoEditor
     {
         Video,
         Audio,
-        Image
+        Image,
+        Unknown
     }
 }

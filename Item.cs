@@ -18,13 +18,15 @@ namespace VideoEditor
         public string fileName { get; set; }
         public int grid { get; set; }
 
-        public int startPoint { get; set; }
-        public int endPoint { get; set; }
+        public double startPoint { get; set; }
+        public double endPoint { get; set; }
 
-        public int startVideo { get; set; }
-        public int endVideo { get; set; }
-        public int duration { get; set; }
+        public double startVideo { get; set; }
+        public double endVideo { get; set; }
+        public double duration { get; set; }
         public Button button { get; set; }
+        public int linkedItemId { get; set; } = -1;
+        public float Volume { get; set; } = 1.0f;
 
     }
 }
