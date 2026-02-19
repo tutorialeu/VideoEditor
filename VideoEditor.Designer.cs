@@ -87,7 +87,7 @@ namespace VideoEditor
             // pnVideoEditing
             // 
             this.pnVideoEditing.AllowDrop = true;
-            this.pnVideoEditing.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom)
+            this.pnVideoEditing.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
             | System.Windows.Forms.AnchorStyles.Left)));
             this.pnVideoEditing.AutoScroll = true;
             this.pnVideoEditing.AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink;
@@ -234,7 +234,7 @@ namespace VideoEditor
             this.helpToolStripMenuItem});
             this.menuStrip.Location = new System.Drawing.Point(0, 1);
             this.menuStrip.Name = "menuStrip";
-            this.menuStrip.Size = new System.Drawing.Size(181, 24);
+            this.menuStrip.Size = new System.Drawing.Size(180, 24);
             this.menuStrip.TabIndex = 0;
             this.menuStrip.Text = "menuStrip1";
             // 
@@ -338,7 +338,7 @@ namespace VideoEditor
             this.renderToolStripMenuItem.DropDownItems.AddRange(new System.Windows.Forms.ToolStripItem[] {
             this.createVideoToolStripMenuItem});
             this.renderToolStripMenuItem.Name = "renderToolStripMenuItem";
-            this.renderToolStripMenuItem.Size = new System.Drawing.Size(53, 20);
+            this.renderToolStripMenuItem.Size = new System.Drawing.Size(52, 20);
             this.renderToolStripMenuItem.Text = "Export";
             // 
             // createVideoToolStripMenuItem
@@ -418,7 +418,7 @@ namespace VideoEditor
             // 
             // pnLeftMenu
             // 
-            this.pnLeftMenu.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom)
+            this.pnLeftMenu.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
             | System.Windows.Forms.AnchorStyles.Left)));
             this.pnLeftMenu.AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink;
             this.pnLeftMenu.BorderStyle = System.Windows.Forms.BorderStyle.FixedSingle;
