@@ -2434,7 +2434,7 @@ namespace VideoEditor
         private void infoToolStripMenuItem_Click(object sender, EventArgs e)
         {
             MessageBox.Show(this, "Press Space to pause!\nRight click on cursor for other options!\n" +
-                "Split is avaliable only on pause time!\nPress delete to remove a video from editor!\nSelect and move the videos as you want!");
+                "Split is avaliable only on pause time!\nPress delete to remove a video from editor!\nSelect and move the videos as you want!\n\nFor more visit: https://tutorialeu.ro");
         }
 
         private void deleteToolStripMenuItem_Click(object sender, EventArgs e)
