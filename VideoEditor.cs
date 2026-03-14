@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Diagnostics;
@@ -10,6 +10,7 @@ using WMPLib;
 using System.Runtime.InteropServices;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
+using System.Threading.Tasks;
 
 namespace VideoEditor
 {
@@ -57,7 +58,13 @@ namespace VideoEditor
         // Audio Engine
         private IWavePlayer audioOutputDevice;
         private MixingSampleProvider audioMixer;
-        private Dictionary<int, AudioFileReader> activeAudioStreams = new Dictionary<int, AudioFileReader>();
+        private Dictionary<int, AudioStreamState> activeAudioStreams = new Dictionary<int, AudioStreamState>();
+
+        private class AudioStreamState
+        {
+            public AudioFileReader Reader { get; set; }
+            public ISampleProvider Provider { get; set; }
+        }
         
         // UI Extensions
         private Label lblCurrentTime;
@@ -69,6 +76,11 @@ namespace VideoEditor
         // Render Section
         private double renderStartTime = -1;
         private double renderEndTime = -1;
+
+        // Selection Rectangle State
+        private bool isSelecting = false;
+        private Point selectionStart;
+        private Point selectionEnd;
 
 
         void UpdateTotalViewNrOfPixels()
@@ -128,7 +140,9 @@ namespace VideoEditor
             tbVolume.Dock = DockStyle.Bottom;
             tbVolume.Dock = DockStyle.Bottom;
             tbVolume.ValueChanged += (s, e) => {
-                axWindowsMediaPlayer1.settings.volume = tbVolume.Value;
+                // Ensure WMP stays muted even when volume changes
+                axWindowsMediaPlayer1.settings.mute = true;
+                axWindowsMediaPlayer1.settings.volume = 0;
                 if (audioOutputDevice != null)
                 {
                     audioOutputDevice.Volume = tbVolume.Value / 100f;
@@ -240,6 +254,10 @@ namespace VideoEditor
                 audioMixer.ReadFully = true; // Keep mixer alive even if no inputs
                 audioOutputDevice.Init(audioMixer);
                 audioOutputDevice.Play();
+
+                // Mute WMP by default since NAudio handles all audio now
+                axWindowsMediaPlayer1.settings.mute = true;
+                axWindowsMediaPlayer1.settings.volume = 0;
             }
             catch (Exception ex)
             {
@@ -249,30 +267,54 @@ namespace VideoEditor
 
         private void UpdateAudioPlayback(double currentTime)
         {
-            // Simple approach: When playing, constantly check needed streams
-            // Ideally should be event driven but polling in timer works for simple editing
             if (!projectIsPlaying) 
             {
                  StopAudioPlayback();
                  return;
             }
 
-            // Identify items that SHOULD be playing
-            // Only Audio Items (type == .wav/mp3 etc) OR Video items if we want to support mixing video audio distinct from WMP.
-            // For now, we mix ONLY items where we explicitly want NAudio to handle it.
-            // NOTE: WMP handles the main video track audio. If we have overlapping audios, we use NAudio.
-            // ALSO: If we are in user removed video mode but kept audio, that logic uses items with fileType Audio.
-            
-            var audioItems = items.Values.Where(x => x.fileType == FileType.Audio).ToList();
-            
-            foreach (var item in audioItems)
+            // 1. Cleanup: Remove streams that should no longer be playing
+            // This handles items being deleted, moved, or split
+            var activeKeys = activeAudioStreams.Keys.ToList();
+            foreach (var key in activeKeys)
             {
-                int key = items.FirstOrDefault(x => x.Value == item).Key;
+                bool shouldStop = false;
+                if (!items.ContainsKey(key))
+                {
+                    shouldStop = true; // Item was deleted
+                }
+                else
+                {
+                    var item = items[key];
+                    if (currentTime < item.startPoint || currentTime >= item.endPoint || item.fileType != FileType.Audio)
+                    {
+                        shouldStop = true; // Item no longer intersects or is not audio
+                    }
+                }
+
+                if (shouldStop)
+                {
+                    var state = activeAudioStreams[key];
+                    audioMixer.RemoveMixerInput(state.Provider);
+                    state.Reader.Dispose();
+                    activeAudioStreams.Remove(key);
+                }
+            }
+
+            // 2. Add or Resync: Ensure all items that SHOULD be playing are in the mixer
+            var audioItems = items.Where(x => x.Value.fileType == FileType.Audio).ToList();
+            
+            foreach (var kvp in audioItems)
+            {
+                int key = kvp.Key;
+                var item = kvp.Value;
                 
-                // Check if intersects
                 if (currentTime >= item.startPoint && currentTime < item.endPoint)
                 {
-                    // Should be playing
+                    double offset = currentTime - item.startPoint;
+                    if (offset < 0) offset = 0;
+                    double totalOffsetSeconds = item.startVideo + offset;
+
                     if (!activeAudioStreams.ContainsKey(key))
                     {
                         try
@@ -280,44 +322,43 @@ namespace VideoEditor
                             var reader = new AudioFileReader(item.path);
                             reader.Volume = item.Volume;
                             
-                            // Seek
-                            double offset = currentTime - item.startPoint;
-                            if (offset < 0) offset = 0;
-                            reader.CurrentTime = TimeSpan.FromSeconds(offset);
+                             long pos = (long)(totalOffsetSeconds * reader.WaveFormat.AverageBytesPerSecond);
+                             pos = (pos / reader.WaveFormat.BlockAlign) * reader.WaveFormat.BlockAlign;
+                             reader.Position = pos;
 
-                            // Resample to match mixer (44100Hz) and ensure stereo to fix pitch issues
                             ISampleProvider resampledInput = new WdlResamplingSampleProvider(reader, 44100);
                             if (resampledInput.WaveFormat.Channels == 1)
                             {
                                 resampledInput = new MonoToStereoSampleProvider(resampledInput);
                             }
                             
-                            activeAudioStreams.Add(key, reader);
+                            activeAudioStreams.Add(key, new AudioStreamState { Reader = reader, Provider = resampledInput });
                             audioMixer.AddMixerInput(resampledInput); 
                         }
                         catch (Exception ex) { Console.WriteLine("Audio Play Error: " + ex.Message); }
                     }
-                }
-                else
-                {
-                    // Should NOT be playing
-                    if (activeAudioStreams.ContainsKey(key))
-                    {
-                        var reader = activeAudioStreams[key];
-                        audioMixer.RemoveMixerInput(reader);
-                        reader.Dispose();
-                        activeAudioStreams.Remove(key);
-                    }
+                        // Already playing - check for desync
+                        var state = activeAudioStreams[key];
+                        double currentReaderTime = (double)state.Reader.Position / state.Reader.WaveFormat.AverageBytesPerSecond;
+                        
+                        // Use a slightly larger tolerance (0.2s) to avoid micro-jitter/echoes
+                        // when combined with high-precision time tracking.
+                        if (Math.Abs(currentReaderTime - totalOffsetSeconds) > 0.20)
+                        {
+                            long pos = (long)(totalOffsetSeconds * state.Reader.WaveFormat.AverageBytesPerSecond);
+                            pos = (pos / state.Reader.WaveFormat.BlockAlign) * state.Reader.WaveFormat.BlockAlign;
+                            state.Reader.Position = pos;
+                        }
                 }
             }
         }
 
         private void StopAudioPlayback()
         {
-            foreach (var reader in activeAudioStreams.Values)
+            foreach (var state in activeAudioStreams.Values)
             {
-                audioMixer.RemoveMixerInput(reader);
-                reader.Dispose();
+                audioMixer.RemoveMixerInput(state.Provider);
+                state.Reader.Dispose();
             }
             activeAudioStreams.Clear();
         }
@@ -684,7 +725,12 @@ namespace VideoEditor
         private extern static void SendMessage(System.IntPtr one, int two, int three, int four);
         private void AxWindowsMediaPlayer1_PlayStateChange(object sender, AxWMPLib._WMPOCXEvents_PlayStateChangeEvent e)
         {
-            // Transitions and gaps are now handled in timer1_Tick via projectIsPlaying logic
+            // Nuclear Mute: Force silence whenever playback state changes
+            if (e.newState == (int)WMPPlayState.wmppsPlaying || e.newState == (int)WMPPlayState.wmppsBuffering)
+            {
+                axWindowsMediaPlayer1.settings.mute = true;
+                axWindowsMediaPlayer1.settings.volume = 0;
+            }
         }
         void DrawLeftSideLines(Graphics g)
         {
@@ -780,6 +826,70 @@ namespace VideoEditor
             {
                 g.DrawLine(new Pen(lineColor), new Point(0, i * HEIGHT_LINES + INTERVAL_HEIGHT),
                                                         new Point(nrTotalPixels, i * HEIGHT_LINES + INTERVAL_HEIGHT));
+            }
+
+            // Draw selection rectangle
+            if (isSelecting)
+            {
+                int x = Math.Min(selectionStart.X, selectionEnd.X);
+                int y = Math.Min(selectionStart.Y, selectionEnd.Y);
+                int width = Math.Abs(selectionStart.X - selectionEnd.X);
+                int height = Math.Abs(selectionStart.Y - selectionEnd.Y);
+
+                Rectangle rect = new Rectangle(x, y, width, height);
+                using (Pen pen = new Pen(Color.LightBlue, 1))
+                {
+                    pen.DashStyle = System.Drawing.Drawing2D.DashStyle.Dash;
+                    g.DrawRectangle(pen, rect);
+                }
+                using (Brush brush = new SolidBrush(Color.FromArgb(50, Color.LightBlue)))
+                {
+                    g.FillRectangle(brush, rect);
+                }
+            }
+        }
+
+        private void DrawSelectionOnControl(Graphics g, Control target)
+        {
+            if (!isSelecting) return;
+
+            int x = Math.Min(selectionStart.X, selectionEnd.X);
+            int y = Math.Min(selectionStart.Y, selectionEnd.Y);
+            int width = Math.Abs(selectionStart.X - selectionEnd.X);
+            int height = Math.Abs(selectionStart.Y - selectionEnd.Y);
+
+            // Convert selection rectangle to the target's coordinate system
+            // selectionStart/End are in logical timeline coordinates (including scroll)
+            Point targetScreenPos = target.Parent.PointToScreen(target.Location);
+            Point selectionScreenPos = pnVideoEditing.PointToScreen(new Point(x - pnVideoEditing.HorizontalScroll.Value, y - pnVideoEditing.VerticalScroll.Value));
+
+            Rectangle rect = new Rectangle(
+                selectionScreenPos.X - targetScreenPos.X,
+                selectionScreenPos.Y - targetScreenPos.Y,
+                width,
+                height);
+
+            // Only draw if there's an intersection with the target control
+            Rectangle targetRect = new Rectangle(0, 0, target.Width, target.Height);
+            if (rect.IntersectsWith(targetRect))
+            {
+                using (Pen pen = new Pen(Color.LightBlue, 1))
+                {
+                    pen.DashStyle = System.Drawing.Drawing2D.DashStyle.Dash;
+                    g.DrawRectangle(pen, rect);
+                }
+                using (Brush brush = new SolidBrush(Color.FromArgb(50, Color.LightBlue)))
+                {
+                    g.FillRectangle(brush, rect);
+                }
+            }
+        }
+
+        private void Item_Button_Paint(object sender, PaintEventArgs e)
+        {
+            if (isSelecting)
+            {
+                DrawSelectionOnControl(e.Graphics, (Control)sender);
             }
         }
         /// <summary>
@@ -953,6 +1063,7 @@ namespace VideoEditor
             audioButton.MouseUp += Item_Button_MouseUp;
             audioButton.MouseDown += Item_Button_MouseDown;
             audioButton.MouseMove += Item_Button_MouseMove;
+            audioButton.Paint += Item_Button_Paint;
             audioButton.Size = new Size((int)Math.Round(duration / onePixelSec), HEIGHT_LINES);
             audioButton.Height = HEIGHT_LINES;
             audioButton.BackgroundImageLayout = ImageLayout.Stretch;
@@ -1047,6 +1158,7 @@ namespace VideoEditor
             crtButton.MouseUp += Item_Button_MouseUp;
             crtButton.MouseDown += Item_Button_MouseDown;
             crtButton.MouseMove += Item_Button_MouseMove;
+            crtButton.Paint += Item_Button_Paint;
             crtButton.Size = new Size((int)Math.Round(duration / onePixelSec), HEIGHT_LINES);
             crtButton.Location = new Point((int)Math.Round(startPos / onePixelSec), grid * HEIGHT_LINES + INTERVAL_HEIGHT);
             UpdateVideoEditingMaxWidth(crtButton.Location.X + crtButton.Width);
@@ -1373,6 +1485,16 @@ namespace VideoEditor
                 {
                     Cursor = Cursors.Default;
                 }
+
+                if (e.Button == MouseButtons.Left && isSelecting)
+                {
+                    selectionEnd = new Point(e.X + pnVideoEditing.HorizontalScroll.Value, e.Y + pnVideoEditing.VerticalScroll.Value);
+                    pnVideoEditing.Invalidate();
+                    foreach (Control c in pnVideoEditing.Controls)
+                    {
+                        if (c is Button) c.Invalidate();
+                    }
+                }
             }
         }
 
@@ -1402,12 +1524,64 @@ namespace VideoEditor
 
                 if (Cursor.Current == Cursors.Default)
                 {
-                    if (items.Count() > 0 && currentItem > 0)
+                    if (items.Count() > 0 && currentItem > 0 && e.Y < INTERVAL_HEIGHT)
                     {
                         UpdateCurrentItemByCursor();
                     }
+                    else if (e.Y >= INTERVAL_HEIGHT)
+                    {
+                        // Start rubber-band selection
+                        isSelecting = true;
+                        selectionStart = new Point(logicalX, e.Y + pnVideoEditing.VerticalScroll.Value);
+                        selectionEnd = selectionStart;
+                        
+                        foreach (Control c in pnVideoEditing.Controls)
+                        {
+                            if (c is Button) c.Invalidate();
+                        }
+
+                        if (ModifierKeys != Keys.Control)
+                        {
+                            selectedItemIds.Clear();
+                            RefreshSelectionHighlight();
+                        }
+                    }
                 }
                 pnVideoEditing.Refresh();
+            }
+        }
+
+        private void pnVideoEditing_MouseUp(object sender, MouseEventArgs e)
+        {
+            if (isSelecting)
+            {
+                isSelecting = false;
+
+                int x = Math.Min(selectionStart.X, selectionEnd.X);
+                int y = Math.Min(selectionStart.Y, selectionEnd.Y);
+                int width = Math.Abs(selectionStart.X - selectionEnd.X);
+                int height = Math.Abs(selectionStart.Y - selectionEnd.Y);
+                Rectangle selectionRect = new Rectangle(x, y, width, height);
+
+                foreach (var item in items.Values)
+                {
+                    Rectangle itemRect = new Rectangle(item.button.Location, item.button.Size);
+                    if (selectionRect.IntersectsWith(itemRect))
+                    {
+                        int key = GetCurrentKeyByButton(item.button);
+                        if (!selectedItemIds.Contains(key))
+                        {
+                            selectedItemIds.Add(key);
+                        }
+                    }
+                }
+
+                RefreshSelectionHighlight();
+                pnVideoEditing.Invalidate();
+                foreach (Control c in pnVideoEditing.Controls)
+                {
+                    if (c is Button) c.Invalidate();
+                }
             }
         }
         private void FormEditor_MouseDown(object sender, MouseEventArgs e)
@@ -1419,7 +1593,7 @@ namespace VideoEditor
         }
         private void FormEditor_KeyDown(object sender, KeyEventArgs e)
         {
-            Debug.WriteLine("KeyDown: " + e.KeyCode);
+            // Debug.WriteLine("KeyDown: " + e.KeyCode);
             if (e.KeyCode == Keys.Space)
             {
                 if (isPreviewMode)
@@ -1450,11 +1624,29 @@ namespace VideoEditor
         void SplitCurrentItem()
         {
             double cursorSeconds = (double)pbCursor.Location.X * onePixelSec;
-            var entry = items.FirstOrDefault(x => x.Value.startPoint < cursorSeconds && x.Value.endPoint > cursorSeconds);
-            if (entry.Value != null)
+            List<int> targets = new List<int>();
+
+            if (selectedItemIds.Count > 0)
             {
-                int key = entry.Key;
-                Item item = entry.Value;
+                // Split all selected items that intersect the cursor
+                targets = selectedItemIds.Where(id => items.ContainsKey(id) && 
+                                                    items[id].startPoint < cursorSeconds && 
+                                                    items[id].endPoint > cursorSeconds).ToList();
+            }
+            else
+            {
+                // If nothing selected, find the first item under cursor
+                var entry = items.FirstOrDefault(x => x.Value.startPoint < cursorSeconds && x.Value.endPoint > cursorSeconds);
+                if (entry.Value != null) targets.Add(entry.Key);
+            }
+
+            if (targets.Count == 0) return;
+
+            List<int> newParts = new List<int>();
+
+            foreach (int key in targets)
+            {
+                Item item = items[key];
                 double oldTotalDuration = item.duration;
                 double relativeSplitTime = cursorSeconds - item.startPoint;
                 double splitRatio = relativeSplitTime / oldTotalDuration;
@@ -1526,6 +1718,7 @@ namespace VideoEditor
                 btnSecond.MouseUp += Item_Button_MouseUp;
                 btnSecond.MouseDown += Item_Button_MouseDown;
                 btnSecond.MouseMove += Item_Button_MouseMove;
+                btnSecond.Paint += Item_Button_Paint;
                 
                 if (bmp2 != null)
                 {
@@ -1537,15 +1730,27 @@ namespace VideoEditor
                 secondHalf.button = btnSecond;
                 secondHalf.Volume = item.Volume; // Copy volume settings
                 items.Add(newKey, secondHalf);
-
-                RefreshItemsPositionAndSize();
-                currentItem = newKey;
-                LoadItem(newKey);
-                axWindowsMediaPlayer1.Ctlcontrols.currentPosition = secondHalf.startVideo;
-                if (projectIsPlaying) axWindowsMediaPlayer1.Ctlcontrols.play();
-                else axWindowsMediaPlayer1.Ctlcontrols.pause();
-                pnVideoEditing.Update();
+                newParts.Add(newKey);
             }
+
+            RefreshItemsPositionAndSize();
+            
+            // Select the second halves of the split items
+            selectedItemIds.Clear();
+            selectedItemIds.AddRange(newParts);
+            RefreshSelectionHighlight();
+
+            if (newParts.Count > 0)
+            {
+                currentItem = newParts.Last();
+                LoadItem(currentItem);
+                axWindowsMediaPlayer1.Ctlcontrols.currentPosition = items[currentItem].startVideo;
+            }
+
+            if (projectIsPlaying) axWindowsMediaPlayer1.Ctlcontrols.play();
+            else axWindowsMediaPlayer1.Ctlcontrols.pause();
+            
+            pnVideoEditing.Update();
         }
         void DeleteCurrentItem()
         {
@@ -1580,7 +1785,80 @@ namespace VideoEditor
         }
         private void FormEditor_KeyPress(object sender, KeyPressEventArgs e)
         {
-            Debug.WriteLine("KeyPress: " + e.KeyChar);
+            // Debug.WriteLine("KeyPress: " + e.KeyChar);
+        }
+
+        private async void createVideoToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            if (items.Count == 0)
+            {
+                MessageBox.Show("No items on the timeline to export.");
+                return;
+            }
+
+            SaveFileDialog sfd = new SaveFileDialog();
+            sfd.Filter = "MP4 Video|*.mp4";
+            sfd.Title = "Export Video";
+            sfd.FileName = currentProject.projectName + ".mp4";
+
+            if (sfd.ShowDialog() == DialogResult.OK)
+            {
+                string filePath = sfd.FileName;
+                toolStripProgressBar1.Value = 0;
+                toolStripProgressBar1.Visible = true;
+                toolStripStatusLabel1.Text = "Exporting...";
+
+                try
+                {
+                    // Collect all video items sorted by start point
+                    // We need the full Item objects now to get startVideo/duration offsets
+                    var videoItems = items.Values
+                        .Where(x => x.fileType == FileType.Video)
+                        .OrderBy(x => x.startPoint)
+                        .ToList();
+
+                    if (videoItems.Count == 0)
+                    {
+                        MessageBox.Show("No video items found on the timeline to export.");
+                        toolStripProgressBar1.Visible = false;
+                        toolStripStatusLabel1.Text = "Ready";
+                        return;
+                    }
+
+                    // Show progress activity
+                    Cursor.Current = Cursors.WaitCursor;
+                    
+                    // Call the processing method asynchronously
+                    await Task.Run(() =>
+                    {
+                        VideoProcessing.CutAndConcat(videoItems, filePath, (progress) =>
+                        {
+                            this.Invoke(new Action(() =>
+                            {
+                                int val = (int)(progress * 100);
+                                toolStripProgressBar1.Value = Math.Max(0, Math.Min(100, val));
+                            }));
+                        });
+                    });
+
+                    Cursor.Current = Cursors.Default;
+                    toolStripProgressBar1.Visible = false;
+                    toolStripStatusLabel1.Text = "Ready";
+
+                    var result = MessageBox.Show("Video exported successfully! Do you want to open the file location?", "Export Complete", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+                    if (result == DialogResult.Yes)
+                    {
+                        Process.Start("explorer.exe", $"/select,\"{filePath}\"");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Cursor.Current = Cursors.Default;
+                    toolStripProgressBar1.Visible = false;
+                    toolStripStatusLabel1.Text = "Error";
+                    MessageBox.Show("Export failed: " + ex.Message);
+                }
+            }
         }
 
         private void FormEditor_SizeChanged(object sender, EventArgs e)
@@ -1600,7 +1878,10 @@ namespace VideoEditor
             if (isPreviewMode) return;
 
             double currentTime = (double)pbCursor.Location.X * onePixelSec;
-            // Use strict inequality for endPoint to avoid edge case where cursor is exactly at end
+            
+            // PERIODICALLY FORCE MUTE to prevent WMP from unmuting itself
+            axWindowsMediaPlayer1.settings.mute = true;
+            axWindowsMediaPlayer1.settings.volume = 0;
             
             // Should prioritize items based on track type (Video > Audio) for playback control of WMP
             // But we need to check bounds.
@@ -1680,8 +1961,15 @@ namespace VideoEditor
             double displayTime = (double)pbCursor.Location.X * onePixelSec;
             if (lblCurrentTime != null)
                 lblCurrentTime.Text = TimeSpan.FromSeconds(displayTime).ToString(@"hh\:mm\:ss\:ff");
+            
+            // Calculate High Precision Time for Audio Sync
+            double highPrecisionTime = displayTime;
+            if (crt != null && crt.fileType == FileType.Video && axWindowsMediaPlayer1.playState == WMPPlayState.wmppsPlaying)
+            {
+                highPrecisionTime = crt.startPoint + (axWindowsMediaPlayer1.Ctlcontrols.currentPosition - crt.startVideo);
+            }
                 
-            UpdateAudioPlayback(displayTime);
+            UpdateAudioPlayback(highPrecisionTime);
         }
 
         private void ShowItemContextMenu()
@@ -1831,6 +2119,10 @@ namespace VideoEditor
             double cursorSeconds = (double)pbCursor.Location.X * onePixelSec;
             var intersect = items.Values.Where(x => x.startPoint <= cursorSeconds && x.endPoint >= cursorSeconds).ToList();
 
+            // ALWAYS Stop audio playback when manually changing cursor location 
+            // to force UpdateAudioPlayback to re-sync active streams.
+            StopAudioPlayback();
+
             if (intersect.Count > 0)
             {
                 // Prioritize Video
@@ -1906,7 +2198,7 @@ namespace VideoEditor
             int key = items.FirstOrDefault(x => x.Value == item).Key;
             if (activeAudioStreams.ContainsKey(key))
             {
-                activeAudioStreams[key].Volume = volume;
+                activeAudioStreams[key].Reader.Volume = volume;
             }
         }
 
@@ -1946,6 +2238,7 @@ namespace VideoEditor
                 crtButton.MouseUp += Item_Button_MouseUp;
                 crtButton.MouseDown += Item_Button_MouseDown;
                 crtButton.MouseMove += Item_Button_MouseMove;
+                crtButton.Paint += Item_Button_Paint;
                 crtButton.Size = new Size((int)Math.Round(duration / onePixelSec), HEIGHT_LINES);
                 crtButton.Height = HEIGHT_LINES;
                 crtButton.BackgroundImageLayout = ImageLayout.Stretch;
@@ -2016,6 +2309,7 @@ namespace VideoEditor
                 if (handledByNAudio)
                 {
                     axWindowsMediaPlayer1.settings.mute = true;
+                    axWindowsMediaPlayer1.settings.volume = 0;
                 }
                 else
                 {
@@ -2175,10 +2469,18 @@ namespace VideoEditor
             Console.WriteLine("Scroll Value Changed: " + hScrollBarZoom.Value);
             if (stage != hScrollBarZoom.Value)
             {
+                // Preserve current playhead logical time
+                double currentPlayheadSeconds = (double)pbCursor.Location.X * onePixelSec;
+
                 fragment = MIN_FRAGMENT;
                 stage = hScrollBarZoom.Value;
                 onePixelSec = stageIntervals[stage] / (fragment * 20d);
+                
                 RefreshItemsPositionAndSize();
+
+                // Restore playhead position to the same logical time
+                pbCursor.Location = new Point((int)Math.Round(currentPlayheadSeconds / onePixelSec), pbCursor.Location.Y);
+                
                 pnVideoEditing.Refresh();
             }
         }

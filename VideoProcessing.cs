@@ -1,4 +1,5 @@
-﻿using System.IO;
+using System.IO;
+using System.Collections.Generic;
 using System.Windows.Forms;
 using NReco.VideoConverter;
 using MediaToolkit;
@@ -113,7 +114,7 @@ namespace VideoEditor
             }
             return null;
         }
-        public static void ConcatVideo(string[] inputFile, string outputFile)
+        public static void ConcatVideo(string[] inputFile, string outputFile, Action<double> progressCallback = null)
         {
             if (File.Exists(outputFile))
             {
@@ -121,9 +122,77 @@ namespace VideoEditor
                 return;
             }
             var ConvertVideo = new FFMpegConverter();
+            if (progressCallback != null)
+            {
+                ConvertVideo.ConvertProgress += (sender, e) =>
+                {
+                    double progress = (double)e.Processed.TotalSeconds / e.TotalDuration.TotalSeconds;
+                    progressCallback(progress);
+                };
+            }
             ConcatSettings cs = new ConcatSettings();
 
             ConvertVideo.ConcatMedia(inputFile, outputFile, "mp4", cs);
+        }
+
+        public static void CutAndConcat(List<Item> videoItems, string outputFile, Action<double> progressCallback = null)
+        {
+            if (File.Exists(outputFile))
+            {
+                MessageBox.Show(outputFile + " already exists!");
+                return;
+            }
+
+            var tempFiles = new List<string>();
+            var converter = new FFMpegConverter();
+            string tempDir = Path.Combine(Path.GetTempPath(), "VideoEditorTemp");
+            if (!Directory.Exists(tempDir)) Directory.CreateDirectory(tempDir);
+
+            try
+            {
+                int totalSteps = videoItems.Count + 1; // Cuts + 1 Merge
+                int currentStep = 0;
+
+                // 1. Cut segments
+                foreach (var item in videoItems)
+                {
+                    string tempFile = Path.Combine(tempDir, Guid.NewGuid().ToString() + ".mp4");
+                    tempFiles.Add(tempFile);
+
+                    // We use ConvertMedia with specific settings to cut
+                    // startVideo is the start offset in the SOURCE file
+                    // duration is the length on the timeline
+                    converter.ConvertMedia(item.path, null, tempFile, "mp4", new ConvertSettings()
+                    {
+                        Seek = (float)item.startVideo,
+                        MaxDuration = (float)item.duration
+                    });
+
+                    currentStep++;
+                    progressCallback?.Invoke((double)currentStep / totalSteps);
+                }
+
+                // 2. Concat segments
+                ConcatSettings cs = new ConcatSettings();
+                converter.ConvertProgress += (sender, e) =>
+                {
+                    double mergeProgress = (double)e.Processed.TotalSeconds / e.TotalDuration.TotalSeconds;
+                    // For the merge phase, we map progress from [currentStep/totalSteps] to 1.0
+                    double overallProgress = ((double)currentStep / totalSteps) + (mergeProgress * (1.0 / totalSteps));
+                    progressCallback?.Invoke(Math.Min(0.99, overallProgress));
+                };
+
+                converter.ConcatMedia(tempFiles.ToArray(), outputFile, "mp4", cs);
+                progressCallback?.Invoke(1.0);
+            }
+            finally
+            {
+                // Cleanup
+                foreach (var file in tempFiles)
+                {
+                    try { if (File.Exists(file)) File.Delete(file); } catch { }
+                }
+            }
         }
         public static void CutVideo(string input, string output, TimeSpan start, TimeSpan duration)
         {
@@ -161,8 +230,12 @@ namespace VideoEditor
                 var renderer = new WaveFormRenderer();
                 using (var reader = new AudioFileReader(path))
                 {
-                    var image = renderer.Render(reader, myRendererSettings);
-                    return image;
+                    // Use a wrapper to ensure block-aligned reads
+                    using (var alignedReader = new BlockAlignedStream(reader))
+                    {
+                        var image = renderer.Render(alignedReader, myRendererSettings);
+                        return image;
+                    }
                 }
             }
             catch (Exception ex)
@@ -176,6 +249,34 @@ namespace VideoEditor
                     g.DrawString("Audio Waveform unavailable", SystemFonts.DefaultFont, Brushes.White, 10, 10);
                 }
                 return bmp;
+            }
+        }
+
+        /// <summary>
+        /// A wrapper for WaveStream that ensures all reads are block-aligned.
+        /// Useful for renderers that might request unaligned byte counts.
+        /// </summary>
+        private class BlockAlignedStream : WaveStream
+        {
+            private readonly WaveStream sourceStream;
+            public BlockAlignedStream(WaveStream sourceStream) { this.sourceStream = sourceStream; }
+            public override WaveFormat WaveFormat => sourceStream.WaveFormat;
+            public override long Length => sourceStream.Length;
+            public override long Position
+            {
+                get => sourceStream.Position;
+                set => sourceStream.Position = (value / sourceStream.WaveFormat.BlockAlign) * sourceStream.WaveFormat.BlockAlign;
+            }
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                int alignedCount = (count / sourceStream.WaveFormat.BlockAlign) * sourceStream.WaveFormat.BlockAlign;
+                if (alignedCount == 0) return 0;
+                return sourceStream.Read(buffer, offset, alignedCount);
+            }
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing) sourceStream.Dispose();
+                base.Dispose(disposing);
             }
         }
     }

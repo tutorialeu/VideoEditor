@@ -1,4 +1,4 @@
-﻿
+
 namespace VideoEditor
 {
     partial class VideoEditor
@@ -40,6 +40,9 @@ namespace VideoEditor
             this.pnElements = new System.Windows.Forms.Panel();
             this.pnTitle = new System.Windows.Forms.Panel();
             this.lblProjectName = new System.Windows.Forms.Label();
+            this.statusStrip1 = new System.Windows.Forms.StatusStrip();
+            this.toolStripStatusLabel1 = new System.Windows.Forms.ToolStripStatusLabel();
+            this.toolStripProgressBar1 = new System.Windows.Forms.ToolStripProgressBar();
             this.btnMinimize = new System.Windows.Forms.Button();
             this.btnMaximize = new System.Windows.Forms.Button();
             this.btnExit = new System.Windows.Forms.Button();
@@ -104,6 +107,7 @@ namespace VideoEditor
             this.pnVideoEditing.MouseDown += new System.Windows.Forms.MouseEventHandler(this.pnVideoEditing_MouseDown);
             this.pnVideoEditing.MouseLeave += new System.EventHandler(this.pnVideoEditing_MouseLeave);
             this.pnVideoEditing.MouseMove += new System.Windows.Forms.MouseEventHandler(this.pnVideoEditing_MouseMove);
+            this.pnVideoEditing.MouseUp += new System.Windows.Forms.MouseEventHandler(this.pnVideoEditing_MouseUp);
             this.pnVideoEditing.Resize += new System.EventHandler(this.pnVideoEditing_Resize);
             // 
             // pbCursor
@@ -346,6 +350,7 @@ namespace VideoEditor
             this.createVideoToolStripMenuItem.Name = "createVideoToolStripMenuItem";
             this.createVideoToolStripMenuItem.Size = new System.Drawing.Size(141, 22);
             this.createVideoToolStripMenuItem.Text = "Create Video";
+            this.createVideoToolStripMenuItem.Click += new System.EventHandler(this.createVideoToolStripMenuItem_Click);
             // 
             // helpToolStripMenuItem
             // 
@@ -397,6 +402,29 @@ namespace VideoEditor
             this.axWindowsMediaPlayer1.Size = new System.Drawing.Size(625, 286);
             this.axWindowsMediaPlayer1.TabIndex = 2;
             // 
+            // statusStrip1
+            // 
+            this.statusStrip1.Items.AddRange(new System.Windows.Forms.ToolStripItem[] {
+            this.toolStripStatusLabel1,
+            this.toolStripProgressBar1});
+            this.statusStrip1.Location = new System.Drawing.Point(0, 428);
+            this.statusStrip1.Name = "statusStrip1";
+            this.statusStrip1.Size = new System.Drawing.Size(1246, 22);
+            this.statusStrip1.TabIndex = 3;
+            this.statusStrip1.Text = "statusStrip1";
+            // 
+            // toolStripStatusLabel1
+            // 
+            this.toolStripStatusLabel1.Name = "toolStripStatusLabel1";
+            this.toolStripStatusLabel1.Size = new System.Drawing.Size(39, 17);
+            this.toolStripStatusLabel1.Text = "Ready";
+            // 
+            // toolStripProgressBar1
+            // 
+            this.toolStripProgressBar1.Name = "toolStripProgressBar1";
+            this.toolStripProgressBar1.Size = new System.Drawing.Size(200, 16);
+            this.toolStripProgressBar1.Visible = false;
+            // 
             // splitHorizontal
             // 
             this.splitHorizontal.Dock = System.Windows.Forms.DockStyle.Fill;
@@ -444,6 +472,7 @@ namespace VideoEditor
             this.ControlBox = false;
             this.Controls.Add(this.splitHorizontal);
             this.Controls.Add(this.pnTitle);
+            this.Controls.Add(this.statusStrip1);
             this.KeyPreview = true;
             this.MainMenuStrip = this.menuStrip;
             this.Name = "VideoEditor";
@@ -515,6 +544,9 @@ namespace VideoEditor
         private System.Windows.Forms.SplitContainer splitHorizontal;
         private System.IO.FileSystemWatcher fileSystemWatcher;
         private System.Windows.Forms.Panel pnLeftMenu;
+        private System.Windows.Forms.StatusStrip statusStrip1;
+        private System.Windows.Forms.ToolStripStatusLabel toolStripStatusLabel1;
+        private System.Windows.Forms.ToolStripProgressBar toolStripProgressBar1;
     }
 }
 
